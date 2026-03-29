@@ -45,10 +45,10 @@ static bool PathEndsWithI(const wchar_t *path, const wchar_t *suffix) {
 static bool PathHasKnownImageExtension(const wchar_t *path) {
   return PathEndsWithI(path, L".jpg") || PathEndsWithI(path, L".jpeg") ||
          PathEndsWithI(path, L".png") || PathEndsWithI(path, L".gif") ||
-         PathEndsWithI(path, L".bmp") || PathEndsWithI(path, L".ico") ||
+         PathEndsWithI(path, L".bmp") ||
          PathEndsWithI(path, L".webp") || PathEndsWithI(path, L".tif") ||
          PathEndsWithI(path, L".tiff") || PathEndsWithI(path, L".dng") ||
-         PathEndsWithI(path, L".svg") || PathEndsWithI(path, L".jxl");
+         PathEndsWithI(path, L".jxl");
 }
 } // namespace
 
@@ -74,8 +74,8 @@ bool ImageDimensionsFileProperties::GetExtensionInfo(DLLExtensionInfo *pInfo) {
   pInfo->wsURL[99] = L'\0';
   wcsncpy(
       pInfo->wsDesc,
-      L"Adds a Dimensions column (JPEG, PNG, GIF, WebP, BMP, ICO, TIFF/DNG, "
-      L"SVG, JXL; header/chunk parse; no HEIF/AVIF).",
+      L"Adds a Dimensions column (JPEG, PNG, GIF, WebP, BMP, TIFF/DNG, "
+      L"JXL; header/chunk parse; no HEIF/AVIF).",
       160);
   pInfo->wsDesc[159] = L'\0';
   wcsncpy(pInfo->wsBaseName, L"ImageDimensions", 100);

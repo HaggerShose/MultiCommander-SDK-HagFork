@@ -3,6 +3,7 @@
 #include "ImageDimensionsReader.h"
 
 #include "ImageDimensionsLimits.h"
+#include "ImageDimensionsMagic.h"
 #include "ImageDimensionsParsers.h"
 
 #include <cstdint>
@@ -10,20 +11,17 @@
 #include <vector>
 
 namespace {
-static const unsigned char kPngSignature[8] = {0x89, 0x50, 0x4E, 0x47,
-                                               0x0D, 0x0A, 0x1A, 0x0A};
-
-static const unsigned char kJxlFileSig[12] = {0,   0,   0,    0x0C, 'J',  'X',
-                                              'L', ' ', 0x0D, 0x0A, 0x87, 0x0A};
-
 bool HasPngSignature(const unsigned char *data, size_t len) {
-  if (len < 8)
+  if (len < ImageDimensionsMagic::kPngSignatureSize)
     return false;
-  return memcmp(data, kPngSignature, 8) == 0;
+  return memcmp(data, ImageDimensionsMagic::kPngSignature,
+                ImageDimensionsMagic::kPngSignatureSize) == 0;
 }
 
 bool HasJxlContainerSignature(const unsigned char *data, size_t len) {
-  return len >= 12 && memcmp(data, kJxlFileSig, 12) == 0;
+  return len >= ImageDimensionsMagic::kJxlContainerSignatureSize &&
+         memcmp(data, ImageDimensionsMagic::kJxlContainerSignature,
+                ImageDimensionsMagic::kJxlContainerSignatureSize) == 0;
 }
 
 bool HasJxlCodestreamSignature(const unsigned char *data, size_t len) {
@@ -56,35 +54,6 @@ bool HasBmpSignature(const unsigned char *data, size_t len) {
   return len >= 2 && data[0] == 'B' && data[1] == 'M';
 }
 
-bool HasIcoSignature(const unsigned char *data, size_t len) {
-  return len >= 6 && data[0] == 0 && data[1] == 0 && data[2] == 1 &&
-         data[3] == 0;
-}
-
-bool HasSvgHeuristic(const unsigned char *data, size_t len) {
-  if (len < 5)
-    return false;
-  size_t i = 0;
-  if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF)
-    i = 3;
-  while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' ||
-                     data[i] == '\n'))
-    ++i;
-  const size_t winEnd = i + 256 < len ? i + 256 : len;
-  for (size_t j = i; j + 4 < winEnd; ++j) {
-    if (data[j] != '<')
-      continue;
-    if ((data[j + 1] == 's' || data[j + 1] == 'S') &&
-        (data[j + 2] == 'v' || data[j + 2] == 'V') &&
-        (data[j + 3] == 'g' || data[j + 3] == 'G'))
-      return true;
-    if (data[j + 1] == '?' && (data[j + 2] == 'x' || data[j + 2] == 'X') &&
-        (data[j + 3] == 'm' || data[j + 3] == 'M'))
-      return true;
-  }
-  return false;
-}
-
 bool ParseByFormat(ImageFormat fmt, const unsigned char *p, size_t n,
                    unsigned &outW, unsigned &outH,
                    const volatile bool *pAbort) {
@@ -103,10 +72,6 @@ bool ParseByFormat(ImageFormat fmt, const unsigned char *p, size_t n,
     return TryParseTiffDimensions(p, n, outW, outH);
   case ImageFormat::Bmp:
     return TryParseBmpDimensions(p, n, outW, outH);
-  case ImageFormat::Ico:
-    return TryParseIcoDimensions(p, n, outW, outH);
-  case ImageFormat::Svg:
-    return TryParseSvgDimensions(p, n, outW, outH);
   default:
     return false;
   }
@@ -133,10 +98,6 @@ ImageFormat DetectImageFormat(const unsigned char *data, size_t len) {
     return ImageFormat::Tiff;
   if (HasBmpSignature(data, len))
     return ImageFormat::Bmp;
-  if (HasIcoSignature(data, len))
-    return ImageFormat::Ico;
-  if (HasSvgHeuristic(data, len))
-    return ImageFormat::Svg;
   return ImageFormat::Unknown;
 }
 
@@ -200,42 +161,37 @@ bool TryReadImageDimensions(const wchar_t *path, unsigned &outW, unsigned &outH,
     return true;
   }
 
+  auto tryRereadAndParse =
+      [&](size_t maxBytes,
+          bool (*parse)(const unsigned char *, size_t, unsigned &, unsigned &))
+      -> bool {
+        if (pAbort && *pAbort) {
+          CloseHandle(h);
+          return false;
+        }
+        if (!readPrefix(maxBytes, buf)) {
+          CloseHandle(h);
+          return false;
+        }
+        if (pAbort && *pAbort) {
+          CloseHandle(h);
+          return false;
+        }
+        const bool ok = parse(buf.data(), buf.size(), outW, outH);
+        CloseHandle(h);
+        return ok;
+      };
+
   if (fmt == ImageFormat::Tiff && sz > n &&
       n < kImageDimensionsTiffMaxPrefixBytes) {
-    if (pAbort && *pAbort) {
-      CloseHandle(h);
-      return false;
-    }
-    if (!readPrefix(kImageDimensionsTiffMaxPrefixBytes, buf)) {
-      CloseHandle(h);
-      return false;
-    }
-    if (pAbort && *pAbort) {
-      CloseHandle(h);
-      return false;
-    }
-    const bool ok = TryParseTiffDimensions(buf.data(), buf.size(), outW, outH);
-    CloseHandle(h);
-    return ok;
+    return tryRereadAndParse(kImageDimensionsTiffMaxPrefixBytes,
+                             TryParseTiffDimensions);
   }
 
   if (fmt == ImageFormat::Webp && sz > n &&
       n < kImageDimensionsWebpMaxPrefixBytes) {
-    if (pAbort && *pAbort) {
-      CloseHandle(h);
-      return false;
-    }
-    if (!readPrefix(kImageDimensionsWebpMaxPrefixBytes, buf)) {
-      CloseHandle(h);
-      return false;
-    }
-    if (pAbort && *pAbort) {
-      CloseHandle(h);
-      return false;
-    }
-    const bool ok = TryParseWebpDimensions(buf.data(), buf.size(), outW, outH);
-    CloseHandle(h);
-    return ok;
+    return tryRereadAndParse(kImageDimensionsWebpMaxPrefixBytes,
+                             TryParseWebpDimensions);
   }
 
   CloseHandle(h);

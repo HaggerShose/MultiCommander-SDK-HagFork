@@ -10,9 +10,7 @@ enum class ImageFormat {
   Gif,
   Webp,
   Tiff,
-  Bmp,
-  Ico,
-  Svg
+  Bmp
 };
 
 ImageFormat DetectImageFormat(const unsigned char *data, size_t len);

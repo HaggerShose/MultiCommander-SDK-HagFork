@@ -16,17 +16,11 @@ bool TryParseGifDimensions(const unsigned char *buf, size_t len, unsigned &outW,
 bool TryParseBmpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
                            unsigned &outH);
 
-bool TryParseIcoDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
-
 bool TryParseWebpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
                             unsigned &outH);
 
 bool TryParseTiffDimensions(const unsigned char *buf, size_t len, unsigned &outW,
                           unsigned &outH);
-
-bool TryParseSvgDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
 
 bool TryParseJxlDimensions(const unsigned char *buf, size_t len, unsigned &outW,
                            unsigned &outH);
