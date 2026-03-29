@@ -669,50 +669,115 @@ static bool JxlParseCodestream(const unsigned char *b, size_t n, unsigned &outW,
   return JxlReadSizeHeader(gb, outW, outH) && !gb.err;
 }
 
+// ftyp tag as ReadU32LE("ftyp")
+static constexpr uint32_t kBmffFtypTag = 0x70797466u;
+// jxlc / jxlp tags as ReadU32LE
+static constexpr uint32_t kJxlBoxJxlc = 0x636C786Au;
+static constexpr uint32_t kJxlBoxJxlp = 0x706C786Au;
+
+static bool FtypPayloadDeclaresJxlBrand(const unsigned char *payload,
+                                        size_t psz) {
+  if (psz < 8)
+    return false;
+  if (memcmp(payload, "jxl ", 4) == 0)
+    return true;
+  for (size_t i = 8; i + 4 <= psz; i += 4) {
+    if (memcmp(payload + i, "jxl ", 4) == 0)
+      return true;
+  }
+  return false;
+}
+
+static bool IsJxlFtypLeadingBox(const unsigned char *buf, size_t len) {
+  if (len < 16)
+    return false;
+  uint64_t boxSize = ReadU32BE(buf);
+  size_t head = 8;
+  if (boxSize == 1) {
+    boxSize = 0;
+    for (int i = 0; i < 8; ++i)
+      boxSize = (boxSize << 8) | buf[8 + static_cast<size_t>(i)];
+    head = 16;
+  }
+  if (boxSize != 0 && boxSize < head)
+    return false;
+  const uint32_t tag = ReadU32LE(buf + 4);
+  if (tag != kBmffFtypTag)
+    return false;
+  const size_t payloadOff = head;
+  if (payloadOff > len)
+    return false;
+  size_t psz = 0;
+  if (boxSize == 0)
+    psz = len > payloadOff ? len - payloadOff : 0;
+  else
+    psz = static_cast<size_t>(boxSize - head);
+  if (psz < 8 || psz > len - payloadOff)
+    return false;
+  return FtypPayloadDeclaresJxlBrand(buf + payloadOff, psz);
+}
+
+static bool JxlWalkBoxesFindDimensions(const unsigned char *buf, size_t len,
+                                       unsigned &outW, unsigned &outH) {
+  size_t o = 0;
+  while (o + 8 <= len) {
+    uint64_t boxSize = ReadU32BE(buf + o);
+    const uint32_t tag = ReadU32LE(buf + o + 4);
+    size_t head = 8;
+    if (boxSize == 1) {
+      if (o + 16 > len)
+        break;
+      boxSize = 0;
+      for (int i = 0; i < 8; ++i)
+        boxSize = (boxSize << 8) | buf[o + 8 + static_cast<size_t>(i)];
+      head = 16;
+    }
+    if (boxSize != 0 && boxSize < head)
+      break;
+    const size_t payload = o + head;
+    size_t psz = 0;
+    if (boxSize == 0)
+      psz = len > payload ? len - payload : 0;
+    else
+      psz = static_cast<size_t>(boxSize - head);
+    if (payload > len || psz > len - payload)
+      break;
+    if (tag == kJxlBoxJxlc) {
+      if (JxlParseCodestream(buf + payload, psz, outW, outH))
+        return true;
+    } else if (tag == kJxlBoxJxlp) {
+      if (psz >= 4 &&
+          JxlParseCodestream(buf + payload + 4, psz - 4, outW, outH))
+        return true;
+    }
+    if (boxSize == 0)
+      break;
+    o = payload + psz;
+  }
+  return false;
+}
+
 bool TryParseJxlDimensionsImpl(const unsigned char *buf, size_t len,
                                unsigned &outW, unsigned &outH) {
   outW = 0;
   outH = 0;
   static const unsigned char kJxlFileSig[12] = {
       0, 0, 0, 0x0C, 'J', 'X', 'L', ' ', 0x0D, 0x0A, 0x87, 0x0A};
-  if (len >= 12 && memcmp(buf, kJxlFileSig, 12) == 0) {
-    size_t o = 0;
-    while (o + 8 <= len) {
-      uint64_t boxSize = ReadU32BE(buf + o);
-      const uint32_t tag = ReadU32LE(buf + o + 4);
-      size_t head = 8;
-      if (boxSize == 1) {
-        if (o + 16 > len)
-          break;
-        boxSize = 0;
-        for (int i = 0; i < 8; ++i)
-          boxSize = (boxSize << 8) | buf[o + 8 + static_cast<size_t>(i)];
-        head = 16;
-      }
-      if (boxSize != 0 && boxSize < head)
-        break;
-      const size_t payload = o + head;
-      size_t psz = 0;
-      if (boxSize == 0)
-        psz = len > payload ? len - payload : 0;
-      else
-        psz = static_cast<size_t>(boxSize - head);
-      if (payload > len || psz > len - payload)
-        break;
-      if (tag == 0x636C786Au) {
-        if (JxlParseCodestream(buf + payload, psz, outW, outH))
-          return true;
-      }
-      if (boxSize == 0)
-        break;
-      o = payload + psz;
-    }
+  const bool hasJxlSigBox =
+      len >= 12 && memcmp(buf, kJxlFileSig, 12) == 0;
+  if (hasJxlSigBox || IsJxlFtypLeadingBox(buf, len)) {
+    if (JxlWalkBoxesFindDimensions(buf, len, outW, outH))
+      return true;
     return false;
   }
   return JxlParseCodestream(buf, len, outW, outH);
 }
 
 } // namespace
+
+bool IsJxlBmffFilePrefix(const unsigned char *buf, size_t len) {
+  return IsJxlFtypLeadingBox(buf, len);
+}
 
 bool TryParseJpegDimensions(const unsigned char *buf, size_t len,
                             unsigned &outW, unsigned &outH,

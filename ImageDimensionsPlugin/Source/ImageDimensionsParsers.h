@@ -30,3 +30,6 @@ bool TryParseSvgDimensions(const unsigned char *buf, size_t len, unsigned &outW,
 
 bool TryParseJxlDimensions(const unsigned char *buf, size_t len, unsigned &outW,
                            unsigned &outH);
+
+// ISO BMFF container with ftyp major/compatible brand "jxl " (no leading JXL sig box).
+bool IsJxlBmffFilePrefix(const unsigned char *buf, size_t len);

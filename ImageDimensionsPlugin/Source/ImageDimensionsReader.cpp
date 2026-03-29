@@ -119,7 +119,8 @@ ImageFormat DetectImageFormat(const unsigned char *data, size_t len) {
     return ImageFormat::Png;
   // JPEG XL: container or raw codestream (FF 0A) before generic JPEG (FF D8).
   if (HasJxlContainerSignature(data, len) ||
-      HasJxlCodestreamSignature(data, len))
+      HasJxlCodestreamSignature(data, len) ||
+      IsJxlBmffFilePrefix(data, len))
     return ImageFormat::Jxl;
   if (HasJpegSignature(data, len))
     return ImageFormat::Jpeg;
