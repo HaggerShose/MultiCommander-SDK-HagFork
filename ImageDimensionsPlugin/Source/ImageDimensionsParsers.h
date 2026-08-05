@@ -2,28 +2,11 @@
 
 #include <stddef.h>
 
-// Buffer-only dimension parsers (no I/O). Used by ImageDimensionsReader.
+enum class ImageFormat { Unknown, Png, Jxl, Jpeg, Gif, Webp, Tiff, Bmp };
 
-bool TryParseJpegDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                            unsigned &outH, const volatile bool *pAbort);
+// Order matters (see DetectImageFormat).
+ImageFormat DetectImageFormat(const unsigned char *data, size_t len);
 
-bool TryParsePngDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
-
-bool TryParseGifDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
-
-bool TryParseBmpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
-
-bool TryParseWebpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                            unsigned &outH);
-
-bool TryParseTiffDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                          unsigned &outH);
-
-bool TryParseJxlDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH);
-
-// ISO BMFF container with ftyp major/compatible brand "jxl " (no leading JXL sig box).
-bool IsJxlBmffFilePrefix(const unsigned char *buf, size_t len);
+bool ParseImageDimensions(ImageFormat fmt, const unsigned char *buf, size_t len,
+                          unsigned &outW, unsigned &outH,
+                          const volatile bool *pAbort);

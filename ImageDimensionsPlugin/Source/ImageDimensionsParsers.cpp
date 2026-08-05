@@ -1,12 +1,15 @@
 #include "ImageDimensionsParsers.h"
 
-#include "ImageDimensionsMagic.h"
-
 #include <cstdint>
 #include <cstring>
 #include <limits>
 
 namespace {
+
+constexpr unsigned char kPngSignature[8] = {0x89, 0x50, 0x4E, 0x47,
+                                            0x0D, 0x0A, 0x1A, 0x0A};
+constexpr unsigned char kJxlContainerSignature[12] = {
+    0, 0, 0, 0x0C, 'J', 'X', 'L', ' ', 0x0D, 0x0A, 0x87, 0x0A};
 
 // --- Shared integer readers
 // --------------------------------------------------------
@@ -41,9 +44,8 @@ bool IsSofMarker(unsigned char m) {
          (m >= 0xC9 && m <= 0xCB) || (m >= 0xCD && m <= 0xCF);
 }
 
-bool ParseJpegSofDimensions(const unsigned char *buf, size_t bufSize,
-                            unsigned &outW, unsigned &outH,
-                            const volatile bool *pAbort) {
+bool ParseJpeg(const unsigned char *buf, size_t bufSize, unsigned &outW,
+               unsigned &outH, const volatile bool *pAbort) {
   outW = 0;
   outH = 0;
 
@@ -121,16 +123,13 @@ bool ParseJpegSofDimensions(const unsigned char *buf, size_t bufSize,
 // --- PNG (IHDR)
 // ---------------------------------------------------------------
 
-constexpr size_t kPngIhdrBytes = 8 + 4 + 4 + 13;
-
-bool ParsePngIhdr(const unsigned char *buf, size_t n, unsigned &outW,
-                  unsigned &outH) {
+bool ParsePng(const unsigned char *buf, size_t n, unsigned &outW,
+              unsigned &outH) {
   outW = 0;
   outH = 0;
-  if (n < kPngIhdrBytes)
+  if (n < 8 + 4 + 4 + 13)
     return false;
-  if (memcmp(buf, ImageDimensionsMagic::kPngSignature,
-             ImageDimensionsMagic::kPngSignatureSize) != 0)
+  if (memcmp(buf, kPngSignature, sizeof(kPngSignature)) != 0)
     return false;
   const uint32_t chunkLen = ReadU32BE(buf + 8);
   if (chunkLen != 13)
@@ -149,13 +148,22 @@ bool ParsePngIhdr(const unsigned char *buf, size_t n, unsigned &outW,
 // --- GIF (logical screen)
 // -----------------------------------------------------
 
-constexpr size_t kGifLogicalScreenDescriptorEnd = 10;
-
-bool IsGif87aOr89a(const unsigned char *buf, size_t n) {
-  if (n < 6)
+bool ParseGif(const unsigned char *buf, size_t len, unsigned &outW,
+              unsigned &outH) {
+  outW = 0;
+  outH = 0;
+  if (len < 10)
     return false;
-  return buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == '8' &&
-         (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a';
+  if (!(buf[0] == 'G' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == '8' &&
+        (buf[4] == '7' || buf[4] == '9') && buf[5] == 'a'))
+    return false;
+  const unsigned w = ReadU16LE(buf + 6);
+  const unsigned h = ReadU16LE(buf + 8);
+  if (w == 0 || h == 0)
+    return false;
+  outW = w;
+  outH = h;
+  return true;
 }
 
 // --- WebP
@@ -166,7 +174,7 @@ bool ParseWebpVp8LossyPayload(const unsigned char *payload, size_t psz,
   outW = 0;
   outH = 0;
   // VP8 keyframe: 3-byte frame tag, start code 9D 01 2A @3..5, width/height
-  // @6..9 (LE uint16, 14-bit each — libwebp / RFC 6386).
+  // @6..9 (LE uint16, 14-bit each -- libwebp / RFC 6386).
   if (psz < 10)
     return false;
   if (payload[3] != 0x9D || payload[4] != 0x01 || payload[5] != 0x2A)
@@ -200,9 +208,7 @@ bool ParseWebpVp8xPayload(const unsigned char *payload, size_t psz,
                           unsigned &outW, unsigned &outH) {
   outW = 0;
   outH = 0;
-  // VP8X chunk payload (RIFF spec): byte 0 = feature flags; bytes 1-3 =
-  // reserved (0); bytes 4-6 = canvas width minus one; bytes 7-9 = canvas height
-  // minus one (24-bit LE each).
+  // VP8X: flags @0, reserved @1..3, canvas w-1 @4..6, h-1 @7..9 (24-bit LE).
   if (psz < 10)
     return false;
   const unsigned w = 1u + (static_cast<unsigned>(payload[4]) |
@@ -221,8 +227,8 @@ bool ParseWebpVp8xPayload(const unsigned char *payload, size_t psz,
 // One RIFF-like region: top-level WebP payload after the 12-byte file header,
 // or ANMF frame data. Advance by declared chunk size even if the payload is not
 // fully in `len`; parsers only receive min(declared, available) bytes.
-static bool WebpScanChunkRegion(const unsigned char *base, size_t len,
-                                unsigned &outW, unsigned &outH) {
+bool WebpScanChunkRegion(const unsigned char *base, size_t len, unsigned &outW,
+                         unsigned &outH) {
   outW = 0;
   outH = 0;
   size_t off = 0;
@@ -265,248 +271,24 @@ static bool WebpScanChunkRegion(const unsigned char *base, size_t len,
   return false;
 }
 
-// --- TIFF (first IFD, tags 256 / 257)
-// ------------------------------------------------------------
-
-bool TiffReadTagValue(uint16_t type, uint32_t count, uint32_t valueField,
-                      uint32_t &outVal) {
-  outVal = 0;
-  if (count != 1)
-    return false;
-  if (type == 3) {
-    outVal = valueField & 0xFFFFu;
-    return outVal > 0;
-  }
-  if (type == 4) {
-    outVal = valueField;
-    return outVal > 0;
-  }
-  return false;
-}
-
-// --- JPEG XL (codestream size header, LSB-first bit reader; after FFmpeg)
-// ------------------------------------------------------------
-
-struct JxlBitReaderLe {
-  const unsigned char *p;
-  size_t lenBytes;
-  size_t bitPos = 0;
-  bool err = false;
-
-  bool haveBits(size_t n) const { return bitPos + n <= lenBytes * 8; }
-
-  unsigned pull(unsigned n) {
-    if (!haveBits(n)) {
-      err = true;
-      return 0;
-    }
-    unsigned v = 0;
-    for (unsigned i = 0; i < n; ++i) {
-      const size_t b = bitPos / 8;
-      const int o = static_cast<int>(bitPos % 8);
-      ++bitPos;
-      if ((p[b] >> o) & 1)
-        v |= (1u << i);
-    }
-    return v;
-  }
-};
-
-static uint32_t JxlU32(JxlBitReaderLe &gb, uint32_t c0, uint32_t c1,
-                       uint32_t c2, uint32_t c3, uint32_t u0, uint32_t u1,
-                       uint32_t u2, uint32_t u3) {
-  const uint32_t choice = gb.pull(2);
-  const uint32_t c[] = {c0, c1, c2, c3};
-  const uint32_t u[] = {u0, u1, u2, u3};
-  uint32_t ret = c[choice];
-  if (u[choice] != 0)
-    ret += gb.pull(u[choice]);
-  return ret;
-}
-
-static uint32_t JxlWidthFromRatio(uint32_t height, int ratio) {
-  const uint64_t h64 = height;
-  switch (ratio) {
-  case 1:
-    return height;
-  case 2:
-    return static_cast<uint32_t>((h64 * 12) / 10);
-  case 3:
-    return static_cast<uint32_t>((h64 * 4) / 3);
-  case 4:
-    return static_cast<uint32_t>((h64 * 3) / 2);
-  case 5:
-    return static_cast<uint32_t>((h64 * 16) / 9);
-  case 6:
-    return static_cast<uint32_t>((h64 * 5) / 4);
-  case 7:
-    return static_cast<uint32_t>(h64 * 2);
-  default:
-    return 0;
-  }
-}
-
-static bool JxlReadSizeHeader(JxlBitReaderLe &gb, unsigned &outW,
-                              unsigned &outH) {
-  uint32_t width = 0;
-  uint32_t height = 0;
-  if (gb.pull(1)) {
-    height = (gb.pull(5) + 1u) << 3u;
-    const int ratio = static_cast<int>(gb.pull(3));
-    width = JxlWidthFromRatio(height, ratio);
-    if (width == 0)
-      width = (gb.pull(5) + 1u) << 3u;
-  } else {
-    height = 1 + JxlU32(gb, 0, 0, 0, 0, 9, 13, 18, 30);
-    const int ratio = static_cast<int>(gb.pull(3));
-    width = JxlWidthFromRatio(height, ratio);
-    if (width == 0)
-      width = 1 + JxlU32(gb, 0, 0, 0, 0, 9, 13, 18, 30);
-  }
-  if (gb.err || width == 0 || height == 0 || width > (1u << 18) ||
-      height > (1u << 18))
-    return false;
-  outW = width;
-  outH = height;
-  return true;
-}
-
-static bool JxlParseCodestream(const unsigned char *b, size_t n, unsigned &outW,
-                               unsigned &outH) {
-  outW = outH = 0;
-  if (n < 4)
-    return false;
-  JxlBitReaderLe gb{b, n, 0};
-  const uint32_t sig = gb.pull(16);
-  if (sig != 0x0AFFu)
-    return false;
-  return JxlReadSizeHeader(gb, outW, outH) && !gb.err;
-}
-
-// ftyp tag as ReadU32LE("ftyp")
-static constexpr uint32_t kBmffFtypTag = 0x70797466u;
-// jxlc / jxlp tags as ReadU32LE
-static constexpr uint32_t kJxlBoxJxlc = 0x636C786Au;
-static constexpr uint32_t kJxlBoxJxlp = 0x706C786Au;
-
-static bool FtypPayloadDeclaresJxlBrand(const unsigned char *payload,
-                                        size_t psz) {
-  if (psz < 8)
-    return false;
-  if (memcmp(payload, "jxl ", 4) == 0)
-    return true;
-  for (size_t i = 8; i + 4 <= psz; i += 4) {
-    if (memcmp(payload + i, "jxl ", 4) == 0)
-      return true;
-  }
-  return false;
-}
-
-static bool IsJxlFtypLeadingBox(const unsigned char *buf, size_t len) {
-  if (len < 16)
-    return false;
-  uint64_t boxSize = ReadU32BE(buf);
-  size_t head = 8;
-  if (boxSize == 1) {
-    boxSize = 0;
-    for (int i = 0; i < 8; ++i)
-      boxSize = (boxSize << 8) | buf[8 + static_cast<size_t>(i)];
-    head = 16;
-  }
-  if (boxSize != 0 && boxSize < head)
-    return false;
-  const uint32_t tag = ReadU32LE(buf + 4);
-  if (tag != kBmffFtypTag)
-    return false;
-  const size_t payloadOff = head;
-  if (payloadOff > len)
-    return false;
-  size_t psz = 0;
-  if (boxSize == 0)
-    psz = len > payloadOff ? len - payloadOff : 0;
-  else
-    psz = static_cast<size_t>(boxSize - head);
-  if (psz < 8 || psz > len - payloadOff)
-    return false;
-  return FtypPayloadDeclaresJxlBrand(buf + payloadOff, psz);
-}
-
-static bool JxlWalkBoxesFindDimensions(const unsigned char *buf, size_t len,
-                                       unsigned &outW, unsigned &outH) {
-  size_t o = 0;
-  while (o + 8 <= len) {
-    uint64_t boxSize = ReadU32BE(buf + o);
-    const uint32_t tag = ReadU32LE(buf + o + 4);
-    size_t head = 8;
-    if (boxSize == 1) {
-      if (o + 16 > len)
-        break;
-      boxSize = 0;
-      for (int i = 0; i < 8; ++i)
-        boxSize = (boxSize << 8) | buf[o + 8 + static_cast<size_t>(i)];
-      head = 16;
-    }
-    if (boxSize != 0 && boxSize < head)
-      break;
-    const size_t payload = o + head;
-    size_t psz = 0;
-    if (boxSize == 0)
-      psz = len > payload ? len - payload : 0;
-    else
-      psz = static_cast<size_t>(boxSize - head);
-    if (payload > len || psz > len - payload)
-      break;
-    if (tag == kJxlBoxJxlc) {
-      if (JxlParseCodestream(buf + payload, psz, outW, outH))
-        return true;
-    } else if (tag == kJxlBoxJxlp) {
-      if (psz >= 4 &&
-          JxlParseCodestream(buf + payload + 4, psz - 4, outW, outH))
-        return true;
-    }
-    if (boxSize == 0)
-      break;
-    o = payload + psz;
-  }
-  return false;
-}
-
-} // namespace
-
-bool IsJxlBmffFilePrefix(const unsigned char *buf, size_t len) {
-  return IsJxlFtypLeadingBox(buf, len);
-}
-
-bool TryParseJpegDimensions(const unsigned char *buf, size_t len,
-                            unsigned &outW, unsigned &outH,
-                            const volatile bool *pAbort) {
-  return ParseJpegSofDimensions(buf, len, outW, outH, pAbort);
-}
-
-bool TryParsePngDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH) {
-  return ParsePngIhdr(buf, len, outW, outH);
-}
-
-bool TryParseGifDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH) {
+bool ParseWebp(const unsigned char *buf, size_t len, unsigned &outW,
+               unsigned &outH) {
   outW = 0;
   outH = 0;
-  if (len < kGifLogicalScreenDescriptorEnd)
+  if (len < 12)
     return false;
-  if (!IsGif87aOr89a(buf, len))
+  if (buf[0] != 'R' || buf[1] != 'I' || buf[2] != 'F' || buf[3] != 'F')
     return false;
-  const unsigned w = ReadU16LE(buf + 6);
-  const unsigned h = ReadU16LE(buf + 8);
-  if (w == 0 || h == 0)
+  if (buf[8] != 'W' || buf[9] != 'E' || buf[10] != 'B' || buf[11] != 'P')
     return false;
-  outW = w;
-  outH = h;
-  return true;
+  return WebpScanChunkRegion(buf + 12, len - 12, outW, outH);
 }
 
-bool TryParseBmpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH) {
+// --- BMP
+// ------------------------------------------------------------
+
+bool ParseBmp(const unsigned char *buf, size_t len, unsigned &outW,
+              unsigned &outH) {
   outW = 0;
   outH = 0;
   if (len < 26)
@@ -546,21 +328,27 @@ bool TryParseBmpDimensions(const unsigned char *buf, size_t len, unsigned &outW,
   return true;
 }
 
-bool TryParseWebpDimensions(const unsigned char *buf, size_t len,
-                            unsigned &outW, unsigned &outH) {
-  outW = 0;
-  outH = 0;
-  if (len < 12)
+// --- TIFF (first IFD, tags 256 / 257)
+// ------------------------------------------------------------
+
+bool TiffReadTagValue(uint16_t type, uint32_t count, uint32_t valueField,
+                      uint32_t &outVal) {
+  outVal = 0;
+  if (count != 1)
     return false;
-  if (buf[0] != 'R' || buf[1] != 'I' || buf[2] != 'F' || buf[3] != 'F')
-    return false;
-  if (buf[8] != 'W' || buf[9] != 'E' || buf[10] != 'B' || buf[11] != 'P')
-    return false;
-  return WebpScanChunkRegion(buf + 12, len - 12, outW, outH);
+  if (type == 3) {
+    outVal = valueField & 0xFFFFu;
+    return outVal > 0;
+  }
+  if (type == 4) {
+    outVal = valueField;
+    return outVal > 0;
+  }
+  return false;
 }
 
-bool TryParseTiffDimensions(const unsigned char *buf, size_t len,
-                            unsigned &outW, unsigned &outH) {
+bool ParseTiff(const unsigned char *buf, size_t len, unsigned &outW,
+               unsigned &outH) {
   outW = 0;
   outH = 0;
   if (len < 8)
@@ -603,15 +391,269 @@ bool TryParseTiffDimensions(const unsigned char *buf, size_t len,
   return true;
 }
 
-bool TryParseJxlDimensions(const unsigned char *buf, size_t len, unsigned &outW,
-                           unsigned &outH) {
+// --- JPEG XL (codestream size header, LSB-first bit reader; after FFmpeg)
+// ------------------------------------------------------------
+
+struct JxlBitReaderLe {
+  const unsigned char *p;
+  size_t lenBytes;
+  size_t bitPos = 0;
+  bool err = false;
+
+  bool haveBits(size_t n) const { return bitPos + n <= lenBytes * 8; }
+
+  unsigned pull(unsigned n) {
+    if (!haveBits(n)) {
+      err = true;
+      return 0;
+    }
+    unsigned v = 0;
+    for (unsigned i = 0; i < n; ++i) {
+      const size_t b = bitPos / 8;
+      const int o = static_cast<int>(bitPos % 8);
+      ++bitPos;
+      if ((p[b] >> o) & 1)
+        v |= (1u << i);
+    }
+    return v;
+  }
+};
+
+uint32_t JxlU32(JxlBitReaderLe &gb, uint32_t c0, uint32_t c1, uint32_t c2,
+                uint32_t c3, uint32_t u0, uint32_t u1, uint32_t u2,
+                uint32_t u3) {
+  const uint32_t choice = gb.pull(2);
+  const uint32_t c[] = {c0, c1, c2, c3};
+  const uint32_t u[] = {u0, u1, u2, u3};
+  uint32_t ret = c[choice];
+  if (u[choice] != 0)
+    ret += gb.pull(u[choice]);
+  return ret;
+}
+
+uint32_t JxlWidthFromRatio(uint32_t height, int ratio) {
+  const uint64_t h64 = height;
+  switch (ratio) {
+  case 1:
+    return height;
+  case 2:
+    return static_cast<uint32_t>((h64 * 12) / 10);
+  case 3:
+    return static_cast<uint32_t>((h64 * 4) / 3);
+  case 4:
+    return static_cast<uint32_t>((h64 * 3) / 2);
+  case 5:
+    return static_cast<uint32_t>((h64 * 16) / 9);
+  case 6:
+    return static_cast<uint32_t>((h64 * 5) / 4);
+  case 7:
+    return static_cast<uint32_t>(h64 * 2);
+  default:
+    return 0;
+  }
+}
+
+bool JxlReadSizeHeader(JxlBitReaderLe &gb, unsigned &outW, unsigned &outH) {
+  uint32_t width = 0;
+  uint32_t height = 0;
+  if (gb.pull(1)) {
+    height = (gb.pull(5) + 1u) << 3u;
+    const int ratio = static_cast<int>(gb.pull(3));
+    width = JxlWidthFromRatio(height, ratio);
+    if (width == 0)
+      width = (gb.pull(5) + 1u) << 3u;
+  } else {
+    height = 1 + JxlU32(gb, 0, 0, 0, 0, 9, 13, 18, 30);
+    const int ratio = static_cast<int>(gb.pull(3));
+    width = JxlWidthFromRatio(height, ratio);
+    if (width == 0)
+      width = 1 + JxlU32(gb, 0, 0, 0, 0, 9, 13, 18, 30);
+  }
+  if (gb.err || width == 0 || height == 0 || width > (1u << 18) ||
+      height > (1u << 18))
+    return false;
+  outW = width;
+  outH = height;
+  return true;
+}
+
+bool JxlParseCodestream(const unsigned char *b, size_t n, unsigned &outW,
+                        unsigned &outH) {
+  outW = outH = 0;
+  if (n < 4)
+    return false;
+  JxlBitReaderLe gb{b, n, 0};
+  const uint32_t sig = gb.pull(16);
+  if (sig != 0x0AFFu)
+    return false;
+  return JxlReadSizeHeader(gb, outW, outH) && !gb.err;
+}
+
+// ftyp / jxlc / jxlp as ReadU32LE of ASCII fourcc
+constexpr uint32_t kBmffFtypTag = 0x70797466u;
+constexpr uint32_t kJxlBoxJxlc = 0x636C786Au;
+constexpr uint32_t kJxlBoxJxlp = 0x706C786Au;
+
+bool FtypPayloadDeclaresJxlBrand(const unsigned char *payload, size_t psz) {
+  if (psz < 8)
+    return false;
+  if (memcmp(payload, "jxl ", 4) == 0)
+    return true;
+  for (size_t i = 8; i + 4 <= psz; i += 4) {
+    if (memcmp(payload + i, "jxl ", 4) == 0)
+      return true;
+  }
+  return false;
+}
+
+// Parse one ISO BMFF box at offset o. On success fills tag/payload/nextOff;
+// isLast is true when boxSize==0 (extends to EOF).
+bool ReadBmffBoxHeader(const unsigned char *buf, size_t len, size_t o,
+                       uint32_t &tag, size_t &payloadOff, size_t &psz,
+                       size_t &nextOff, bool &isLast) {
+  if (o + 8 > len)
+    return false;
+  uint64_t boxSize = ReadU32BE(buf + o);
+  tag = ReadU32LE(buf + o + 4);
+  size_t head = 8;
+  if (boxSize == 1) {
+    if (o + 16 > len)
+      return false;
+    boxSize = 0;
+    for (int i = 0; i < 8; ++i)
+      boxSize = (boxSize << 8) | buf[o + 8 + static_cast<size_t>(i)];
+    head = 16;
+  }
+  if (boxSize != 0 && boxSize < head)
+    return false;
+  payloadOff = o + head;
+  if (payloadOff > len)
+    return false;
+  if (boxSize == 0) {
+    psz = len - payloadOff;
+    isLast = true;
+    nextOff = len;
+  } else {
+    psz = static_cast<size_t>(boxSize - head);
+    if (psz > len - payloadOff)
+      return false;
+    isLast = false;
+    nextOff = payloadOff + psz;
+  }
+  return true;
+}
+
+bool IsJxlFtypLeadingBox(const unsigned char *buf, size_t len) {
+  uint32_t tag = 0;
+  size_t payloadOff = 0;
+  size_t psz = 0;
+  size_t nextOff = 0;
+  bool isLast = false;
+  if (!ReadBmffBoxHeader(buf, len, 0, tag, payloadOff, psz, nextOff, isLast))
+    return false;
+  if (tag != kBmffFtypTag || psz < 8)
+    return false;
+  return FtypPayloadDeclaresJxlBrand(buf + payloadOff, psz);
+}
+
+bool JxlWalkBoxesFindDimensions(const unsigned char *buf, size_t len,
+                                unsigned &outW, unsigned &outH) {
+  size_t o = 0;
+  while (o + 8 <= len) {
+    uint32_t tag = 0;
+    size_t payloadOff = 0;
+    size_t psz = 0;
+    size_t nextOff = 0;
+    bool isLast = false;
+    if (!ReadBmffBoxHeader(buf, len, o, tag, payloadOff, psz, nextOff, isLast))
+      break;
+    if (tag == kJxlBoxJxlc) {
+      if (JxlParseCodestream(buf + payloadOff, psz, outW, outH))
+        return true;
+    } else if (tag == kJxlBoxJxlp) {
+      if (psz >= 4 &&
+          JxlParseCodestream(buf + payloadOff + 4, psz - 4, outW, outH))
+        return true;
+    }
+    if (isLast)
+      break;
+    o = nextOff;
+  }
+  return false;
+}
+
+bool ParseJxl(const unsigned char *buf, size_t len, unsigned &outW,
+              unsigned &outH) {
   outW = 0;
   outH = 0;
   const bool hasJxlSigBox =
-      len >= ImageDimensionsMagic::kJxlContainerSignatureSize &&
-      memcmp(buf, ImageDimensionsMagic::kJxlContainerSignature,
-             ImageDimensionsMagic::kJxlContainerSignatureSize) == 0;
+      len >= sizeof(kJxlContainerSignature) &&
+      memcmp(buf, kJxlContainerSignature, sizeof(kJxlContainerSignature)) == 0;
   if (hasJxlSigBox || IsJxlFtypLeadingBox(buf, len))
     return JxlWalkBoxesFindDimensions(buf, len, outW, outH);
   return JxlParseCodestream(buf, len, outW, outH);
+}
+
+ImageFormat DetectFormat(const unsigned char *data, size_t len) {
+  if (len >= sizeof(kPngSignature) &&
+      memcmp(data, kPngSignature, sizeof(kPngSignature)) == 0)
+    return ImageFormat::Png;
+  // JPEG XL before generic JPEG (FF D8).
+  if ((len >= sizeof(kJxlContainerSignature) &&
+       memcmp(data, kJxlContainerSignature, sizeof(kJxlContainerSignature)) ==
+           0) ||
+      (len >= 2 && data[0] == 0xFF && data[1] == 0x0A) ||
+      IsJxlFtypLeadingBox(data, len))
+    return ImageFormat::Jxl;
+  if (len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF)
+    return ImageFormat::Jpeg;
+  if (len >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F' &&
+      data[3] == '8' && (data[4] == '7' || data[4] == '9') && data[5] == 'a')
+    return ImageFormat::Gif;
+  if (len >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' &&
+      data[3] == 'F' && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' &&
+      data[11] == 'P')
+    return ImageFormat::Webp;
+  if (len >= 4 &&
+      ((data[0] == 'I' && data[1] == 'I' && data[2] == '*' && data[3] == 0) ||
+       (data[0] == 'M' && data[1] == 'M' && data[2] == 0 && data[3] == '*')))
+    return ImageFormat::Tiff;
+  if (len >= 2 && data[0] == 'B' && data[1] == 'M')
+    return ImageFormat::Bmp;
+  return ImageFormat::Unknown;
+}
+
+bool ParseByFormat(ImageFormat fmt, const unsigned char *buf, size_t len,
+                   unsigned &outW, unsigned &outH,
+                   const volatile bool *pAbort) {
+  switch (fmt) {
+  case ImageFormat::Png:
+    return ParsePng(buf, len, outW, outH);
+  case ImageFormat::Jxl:
+    return ParseJxl(buf, len, outW, outH);
+  case ImageFormat::Jpeg:
+    return ParseJpeg(buf, len, outW, outH, pAbort);
+  case ImageFormat::Gif:
+    return ParseGif(buf, len, outW, outH);
+  case ImageFormat::Webp:
+    return ParseWebp(buf, len, outW, outH);
+  case ImageFormat::Tiff:
+    return ParseTiff(buf, len, outW, outH);
+  case ImageFormat::Bmp:
+    return ParseBmp(buf, len, outW, outH);
+  default:
+    return false;
+  }
+}
+
+} // namespace
+
+ImageFormat DetectImageFormat(const unsigned char *data, size_t len) {
+  return DetectFormat(data, len);
+}
+
+bool ParseImageDimensions(ImageFormat fmt, const unsigned char *buf, size_t len,
+                          unsigned &outW, unsigned &outH,
+                          const volatile bool *pAbort) {
+  return ParseByFormat(fmt, buf, len, outW, outH, pAbort);
 }

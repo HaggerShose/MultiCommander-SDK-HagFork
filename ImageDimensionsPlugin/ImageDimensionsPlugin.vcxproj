@@ -195,12 +195,9 @@
     </ClCompile>
     <ClCompile Include="Source\ImageDimensionsProps.cpp" />
     <ClCompile Include="Source\ImageDimensionsReader.cpp" />
-    <ClCompile Include="Source\ImageDimensionsMagic.cpp" />
     <ClCompile Include="Source\ImageDimensionsParsers.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Source\ImageDimensionsLimits.h" />
-    <ClInclude Include="Source\ImageDimensionsMagic.h" />
     <ClInclude Include="Source\ImageDimensionsProps.h" />
     <ClInclude Include="Source\ImageDimensionsReader.h" />
     <ClInclude Include="Source\ImageDimensionsParsers.h" />

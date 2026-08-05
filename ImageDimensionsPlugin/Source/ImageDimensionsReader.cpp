@@ -1,105 +1,27 @@
-#include "PluginWinConfig.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #include "ImageDimensionsReader.h"
 
-#include "ImageDimensionsLimits.h"
-#include "ImageDimensionsMagic.h"
 #include "ImageDimensionsParsers.h"
 
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
 namespace {
-bool HasPngSignature(const unsigned char *data, size_t len) {
-  if (len < ImageDimensionsMagic::kPngSignatureSize)
-    return false;
-  return memcmp(data, ImageDimensionsMagic::kPngSignature,
-                ImageDimensionsMagic::kPngSignatureSize) == 0;
-}
+// Read only as much as needed: start small, double until parse works.
+// Avoids the old 32 KB -> 512 KB jump (almost every camera JPEG paid 512 KB).
+constexpr size_t kFirstReadBytes = 64 * 1024;
+constexpr size_t kMaxHeaderBytes = 8 * 1024 * 1024;
 
-bool HasJxlContainerSignature(const unsigned char *data, size_t len) {
-  return len >= ImageDimensionsMagic::kJxlContainerSignatureSize &&
-         memcmp(data, ImageDimensionsMagic::kJxlContainerSignature,
-                ImageDimensionsMagic::kJxlContainerSignatureSize) == 0;
-}
-
-bool HasJxlCodestreamSignature(const unsigned char *data, size_t len) {
-  return len >= 2 && data[0] == 0xFF && data[1] == 0x0A;
-}
-
-bool HasJpegSignature(const unsigned char *data, size_t len) {
-  return len >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF;
-}
-
-bool HasGifSignature(const unsigned char *data, size_t len) {
-  return len >= 6 && data[0] == 'G' && data[1] == 'I' && data[2] == 'F' &&
-         data[3] == '8' && (data[4] == '7' || data[4] == '9') && data[5] == 'a';
-}
-
-bool HasWebpSignature(const unsigned char *data, size_t len) {
-  return len >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' &&
-         data[3] == 'F' && data[8] == 'W' && data[9] == 'E' &&
-         data[10] == 'B' && data[11] == 'P';
-}
-
-bool HasTiffSignature(const unsigned char *data, size_t len) {
-  if (len < 4)
-    return false;
-  return (data[0] == 'I' && data[1] == 'I' && data[2] == '*' && data[3] == 0) ||
-         (data[0] == 'M' && data[1] == 'M' && data[2] == 0 && data[3] == '*');
-}
-
-bool HasBmpSignature(const unsigned char *data, size_t len) {
-  return len >= 2 && data[0] == 'B' && data[1] == 'M';
-}
-
-bool ParseByFormat(ImageFormat fmt, const unsigned char *p, size_t n,
-                   unsigned &outW, unsigned &outH,
-                   const volatile bool *pAbort) {
-  switch (fmt) {
-  case ImageFormat::Png:
-    return TryParsePngDimensions(p, n, outW, outH);
-  case ImageFormat::Jxl:
-    return TryParseJxlDimensions(p, n, outW, outH);
-  case ImageFormat::Jpeg:
-    return TryParseJpegDimensions(p, n, outW, outH, pAbort);
-  case ImageFormat::Gif:
-    return TryParseGifDimensions(p, n, outW, outH);
-  case ImageFormat::Webp:
-    return TryParseWebpDimensions(p, n, outW, outH);
-  case ImageFormat::Tiff:
-    return TryParseTiffDimensions(p, n, outW, outH);
-  case ImageFormat::Bmp:
-    return TryParseBmpDimensions(p, n, outW, outH);
-  default:
-    return false;
-  }
+bool NeedsDeepHeader(ImageFormat fmt) {
+  return fmt == ImageFormat::Jpeg || fmt == ImageFormat::Tiff ||
+         fmt == ImageFormat::Webp;
 }
 } // namespace
-
-ImageFormat DetectImageFormat(const unsigned char *data, size_t len) {
-  // PNG: unique 0x89 prefix.
-  if (HasPngSignature(data, len))
-    return ImageFormat::Png;
-  // JPEG XL: container or raw codestream (FF 0A) before generic JPEG (FF D8).
-  if (HasJxlContainerSignature(data, len) ||
-      HasJxlCodestreamSignature(data, len) ||
-      IsJxlBmffFilePrefix(data, len))
-    return ImageFormat::Jxl;
-  if (HasJpegSignature(data, len))
-    return ImageFormat::Jpeg;
-  if (HasGifSignature(data, len))
-    return ImageFormat::Gif;
-  // WebP: RIFF .... WEBP (before other RIFF types).
-  if (HasWebpSignature(data, len))
-    return ImageFormat::Webp;
-  if (HasTiffSignature(data, len))
-    return ImageFormat::Tiff;
-  if (HasBmpSignature(data, len))
-    return ImageFormat::Bmp;
-  return ImageFormat::Unknown;
-}
 
 bool TryReadImageDimensions(const wchar_t *path, unsigned &outW, unsigned &outH,
                             const volatile bool *pAbort) {
@@ -125,93 +47,67 @@ bool TryReadImageDimensions(const wchar_t *path, unsigned &outW, unsigned &outH,
   }
 
   const uint64_t sz = static_cast<uint64_t>(fileSize.QuadPart);
-
-  auto readPrefix = [&](size_t maxBytes,
-                        std::vector<unsigned char> &buf) -> bool {
-    const size_t toRead = sz < maxBytes ? static_cast<size_t>(sz) : maxBytes;
-    buf.resize(toRead);
-    DWORD rd = 0;
-    if (SetFilePointer(h, 0, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER &&
-        GetLastError() != NO_ERROR)
-      return false;
-    if (!ReadFile(h, buf.data(), static_cast<DWORD>(toRead), &rd, nullptr) ||
-        rd < 2)
-      return false;
-    buf.resize(rd);
-    return true;
-  };
+  size_t target = kFirstReadBytes;
+  if (target > sz)
+    target = static_cast<size_t>(sz);
 
   std::vector<unsigned char> buf;
-  if (!readPrefix(kImageDimensionsMaxPrefixBytes, buf)) {
-    CloseHandle(h);
-    return false;
-  }
+  buf.reserve(target < kFirstReadBytes * 2 ? kFirstReadBytes * 2 : target);
 
-  if (pAbort && *pAbort) {
-    CloseHandle(h);
-    return false;
-  }
+  ImageFormat fmt = ImageFormat::Unknown;
+  bool first = true;
 
-  const unsigned char *p = buf.data();
-  const size_t n = buf.size();
-  ImageFormat fmt = DetectImageFormat(p, n);
+  for (;;) {
+    if (pAbort && *pAbort) {
+      CloseHandle(h);
+      return false;
+    }
 
-  if (ParseByFormat(fmt, p, n, outW, outH, pAbort)) {
-    CloseHandle(h);
-    return true;
-  }
+    const size_t old = buf.size();
+    if (target <= old)
+      break;
 
-  auto tryRereadAndParse =
-      [&](size_t maxBytes,
-          bool (*parse)(const unsigned char *, size_t, unsigned &, unsigned &))
-      -> bool {
-        if (pAbort && *pAbort) {
-          CloseHandle(h);
-          return false;
-        }
-        if (!readPrefix(maxBytes, buf)) {
-          CloseHandle(h);
-          return false;
-        }
-        if (pAbort && *pAbort) {
-          CloseHandle(h);
-          return false;
-        }
-        const bool ok = parse(buf.data(), buf.size(), outW, outH);
+    const size_t want = target - old;
+    buf.resize(target);
+    DWORD rd = 0;
+    if (!ReadFile(h, buf.data() + old, static_cast<DWORD>(want), &rd,
+                  nullptr) ||
+        rd == 0) {
+      buf.resize(old);
+      if (old == 0) {
         CloseHandle(h);
-        return ok;
-      };
-
-  if (fmt == ImageFormat::Tiff && sz > n &&
-      n < kImageDimensionsTiffMaxPrefixBytes) {
-    return tryRereadAndParse(kImageDimensionsTiffMaxPrefixBytes,
-                             TryParseTiffDimensions);
-  }
-
-  if (fmt == ImageFormat::Webp && sz > n &&
-      n < kImageDimensionsWebpMaxPrefixBytes) {
-    return tryRereadAndParse(kImageDimensionsWebpMaxPrefixBytes,
-                             TryParseWebpDimensions);
-  }
-
-  if (fmt == ImageFormat::Jpeg && sz > n &&
-      n < kImageDimensionsJpegMaxPrefixBytes) {
-    if (pAbort && *pAbort) {
+        return false;
+      }
+      break;
+    }
+    if (old == 0 && rd < 2) {
       CloseHandle(h);
       return false;
     }
-    if (!readPrefix(kImageDimensionsJpegMaxPrefixBytes, buf)) {
-      CloseHandle(h);
-      return false;
+    buf.resize(old + rd);
+
+    if (first) {
+      fmt = DetectImageFormat(buf.data(), buf.size());
+      first = false;
     }
-    if (pAbort && *pAbort) {
+
+    if (ParseImageDimensions(fmt, buf.data(), buf.size(), outW, outH, pAbort)) {
       CloseHandle(h);
-      return false;
+      return true;
     }
-    const bool ok =
-        TryParseJpegDimensions(buf.data(), buf.size(), outW, outH, pAbort);
-    CloseHandle(h);
-    return ok;
+
+    if (!NeedsDeepHeader(fmt) || buf.size() >= sz ||
+        buf.size() >= kMaxHeaderBytes)
+      break;
+
+    // Double cap for next append (e.g. 64 -> 128 -> 256 ...).
+    if (target >= kMaxHeaderBytes)
+      break;
+    target *= 2;
+    if (target > kMaxHeaderBytes)
+      target = kMaxHeaderBytes;
+    if (target > sz)
+      target = static_cast<size_t>(sz);
   }
 
   CloseHandle(h);

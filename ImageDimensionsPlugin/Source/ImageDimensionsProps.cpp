@@ -4,13 +4,12 @@
 
 // Skip FilePropertiesPlugin.h (heavy IAppInterface.h + duplicate ExtensionInfo
 // include paths break clangd).
+#include "..\..\MultiCommander\SDK\IAppInterface.h"
 #include "..\..\MultiCommander\SDK\IFileItem.h"
 #include "..\..\MultiCommander\SDK\IFilePropertiesManager.h"
 #include "..\..\MultiCommander\SDK\SDKVersion.h"
-#include "..\..\MultiCommander\SDK\IAppInterface.h"
 
 #include "ImageDimensionsProps.h"
-
 
 #include "ImageDimensionsReader.h"
 
@@ -43,12 +42,14 @@ static bool PathEndsWithI(const wchar_t *path, const wchar_t *suffix) {
 }
 
 static bool PathHasKnownImageExtension(const wchar_t *path) {
-  return PathEndsWithI(path, L".jpg") || PathEndsWithI(path, L".jpeg") ||
-         PathEndsWithI(path, L".png") || PathEndsWithI(path, L".gif") ||
-         PathEndsWithI(path, L".bmp") ||
-         PathEndsWithI(path, L".webp") || PathEndsWithI(path, L".tif") ||
-         PathEndsWithI(path, L".tiff") || PathEndsWithI(path, L".dng") ||
-         PathEndsWithI(path, L".jxl");
+  static const wchar_t *const kExts[] = {L".jpg", L".jpeg", L".png", L".gif",
+                                         L".bmp", L".webp", L".tif", L".tiff",
+                                         L".dng", L".jxl"};
+  for (const wchar_t *ext : kExts) {
+    if (PathEndsWithI(path, ext))
+      return true;
+  }
+  return false;
 }
 } // namespace
 
@@ -72,11 +73,10 @@ bool ImageDimensionsFileProperties::GetExtensionInfo(DLLExtensionInfo *pInfo) {
   pInfo->wsPublisher[99] = L'\0';
   wcsncpy(pInfo->wsURL, L"https://multicommander.com", 100);
   pInfo->wsURL[99] = L'\0';
-  wcsncpy(
-      pInfo->wsDesc,
-      L"Adds a Dimensions column (JPEG, PNG, GIF, WebP, BMP, TIFF/DNG, "
-      L"JXL; header/chunk parse; no HEIF/AVIF).",
-      160);
+  wcsncpy(pInfo->wsDesc,
+          L"Adds a Dimensions column (JPEG, PNG, GIF, WebP, BMP, TIFF/DNG, "
+          L"JXL; header/chunk parse; no HEIF/AVIF).",
+          160);
   pInfo->wsDesc[159] = L'\0';
   wcsncpy(pInfo->wsBaseName, L"ImageDimensions", 100);
   pInfo->wsBaseName[99] = L'\0';
@@ -121,9 +121,8 @@ long ImageDimensionsFileProperties::PreStartInit(
     fpd.szColumnName = kDisplay;
     fpd.szCategoryName = kCategory;
     fpd.szDescription = nullptr;
-    // No FILEPROP_ASYNC: async fetches can outlive IFileItem across F5/reload
-    // and caused AVs (invalid vtable / 0xFFFFFFFF). Header scans are fast;
-    // synchronous is safe for item lifetime.
+    // Keep sync: FILEPROP_ASYNC races with F5/reload (IFileItem freed while
+    // worker still runs / first touches a dead item -> AV).
     fpd.dwOptions =
         FILEPROP_STRING | FILEPROP_CUSTOMIZABLE | FILEPROP_ONLY_FILES;
     fpd.IdealWidth = 100;
