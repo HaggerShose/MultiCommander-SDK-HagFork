@@ -92,7 +92,7 @@ bool ParseJpegSofDimensions(const unsigned char *buf, size_t bufSize,
       return false;
 
     if (m + 1 + segLen > bufSize)
-      return false;
+      break;
 
     if (IsSofMarker(mk)) {
       if (segLen < 8) {

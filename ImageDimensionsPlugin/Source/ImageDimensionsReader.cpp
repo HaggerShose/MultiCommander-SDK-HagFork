@@ -194,6 +194,26 @@ bool TryReadImageDimensions(const wchar_t *path, unsigned &outW, unsigned &outH,
                              TryParseWebpDimensions);
   }
 
+  if (fmt == ImageFormat::Jpeg && sz > n &&
+      n < kImageDimensionsJpegMaxPrefixBytes) {
+    if (pAbort && *pAbort) {
+      CloseHandle(h);
+      return false;
+    }
+    if (!readPrefix(kImageDimensionsJpegMaxPrefixBytes, buf)) {
+      CloseHandle(h);
+      return false;
+    }
+    if (pAbort && *pAbort) {
+      CloseHandle(h);
+      return false;
+    }
+    const bool ok =
+        TryParseJpegDimensions(buf.data(), buf.size(), outW, outH, pAbort);
+    CloseHandle(h);
+    return ok;
+  }
+
   CloseHandle(h);
   return false;
 }

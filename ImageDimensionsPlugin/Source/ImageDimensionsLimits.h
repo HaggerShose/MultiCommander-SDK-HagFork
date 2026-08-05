@@ -10,3 +10,6 @@ constexpr size_t kImageDimensionsTiffMaxPrefixBytes = 8 * 1024 * 1024;
 
 // WebP: EXIF/ICC/XMP chunks may precede VP8 / VP8L / VP8X by more than the default prefix.
 constexpr size_t kImageDimensionsWebpMaxPrefixBytes = 8 * 1024 * 1024;
+
+// JPEG: camera EXIF (embedded thumbnail, ICC) can push SOF past the default prefix.
+constexpr size_t kImageDimensionsJpegMaxPrefixBytes = 8 * 1024 * 1024;
